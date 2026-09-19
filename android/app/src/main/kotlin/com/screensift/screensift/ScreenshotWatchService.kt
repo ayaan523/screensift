@@ -119,12 +119,25 @@ class ScreenshotWatchService : Service() {
 
     private fun promoteToForeground() {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
+        // `dataSync` cannot be started from BOOT_COMPLETED on Android 15 and is
+        // capped at a few hours a day, which is exactly the wrong shape for an
+        // always-on observer. `specialUse` is the correct, unrestricted type.
+        if (Build.VERSION.SDK_INT >= 34) {
+            runCatching {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            }.onFailure { stopSelf() }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                )
+            }.onFailure { stopSelf() }
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

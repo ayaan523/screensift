@@ -26,6 +26,35 @@ abstract final class AppPalette {
   static const Color border = Color(0xFFE2E8F0);
   static const Color borderStrong = Color(0xFFCBD5E1);
 
+  // --- Accent --------------------------------------------------------------
+  // A single warm accent. It is reserved for capture affordances (the FAB and
+  // the in-flight indicator) so "something is being scanned" is unmistakable
+  // against the otherwise teal-and-slate UI.
+  static const Color accent = Color(0xFFFF7A45);
+  static const Color accentDark = Color(0xFFE85D26);
+  static const Color accentTint = Color(0xFFFFEDE4);
+
+  // --- Gradients -----------------------------------------------------------
+  /// Page background. Replaces the hardcoded `0xFFF0F9F8` that used to sit on
+  /// the shell's Scaffold and drifted from the rest of the palette.
+  static const LinearGradient canvasGradient = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0xFFF0FBF9), canvas],
+  );
+
+  static const LinearGradient brandGradient = LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [teal, tealDeep],
+  );
+
+  static const LinearGradient accentGradient = LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [accent, accentDark],
+  );
+
   // --- Semantic ------------------------------------------------------------
   static const Color success = Color(0xFF16A34A);
   static const Color successTint = Color(0xFFE8F7EE);

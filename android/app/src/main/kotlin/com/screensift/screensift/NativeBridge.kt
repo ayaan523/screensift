@@ -20,6 +20,13 @@ interface PermissionHost {
     fun hostActivity(): Activity
     fun hasPermission(kind: String): Boolean
     fun requestPermission(kind: String, result: MethodChannel.Result)
+
+    /**
+     * Deletes a capture, confirming with the user first when the OS requires
+     * it. Android 10+ will not let an app delete media it does not own without
+     * an explicit `MediaStore.createDeleteRequest` approval.
+     */
+    fun requestScreenshotDelete(id: Long, result: MethodChannel.Result)
 }
 
 /**
@@ -50,8 +57,15 @@ object NativeBridge {
 
             "startWatching" -> {
                 NativePrefs.setWatchEnabled(context, true)
-                ScreenshotWatchService.start(context)
-                result.success(true)
+                // From Android 12 the OS throws
+                // ForegroundServiceStartNotAllowedException when a background
+                // app tries to promote a service. It is recoverable: the flag is
+                // persisted and BootCompletedReceiver retries on next launch, so
+                // report failure instead of taking the app down.
+                val started = runCatching {
+                    ScreenshotWatchService.start(context)
+                }.isSuccess
+                result.success(started)
             }
 
             "stopWatching" -> {
@@ -62,7 +76,9 @@ object NativeBridge {
 
             "isWatching" -> result.success(ScreenshotWatchService.isRunning)
 
-            "drainBufferedCaptures" -> result.success(ScreenshotBus.buffered())
+            "drainBufferedCaptures" -> result.success(ScreenshotBus.drain())
+
+            "peekBufferedCaptures" -> result.success(ScreenshotBus.buffered())
 
             "clearCaptureBuffer" -> {
                 ScreenshotBus.clearBuffer()
@@ -82,6 +98,13 @@ object NativeBridge {
             "deleteCapture" -> {
                 val id = call.argument<Number>("id")?.toLong() ?: -1L
                 result.success(deleteCapture(context, id))
+            }
+
+            // Auto-Trash path: goes through the host so the OS confirmation
+            // dialog can be shown when MediaStore demands one.
+            "requestDeleteCapture" -> {
+                val id = call.argument<Number>("id")?.toLong() ?: -1L
+                host.requestScreenshotDelete(id, result)
             }
 
             "purgeCache" -> {
@@ -145,7 +168,7 @@ object NativeBridge {
     private fun platformInfo(context: Context): Map<String, Any?> = mapOf(
         "sdk" to Build.VERSION.SDK_INT,
         "android" to Build.VERSION.RELEASE,
-        "device" to "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
+        "device" to "${Build.MANUFACTURER}${Build.MODEL}".trim(),
         "package" to context.packageName,
         "watcherRunning" to ScreenshotWatchService.isRunning,
         "watchEnabled" to NativePrefs.isWatchEnabled(context),
@@ -154,4 +177,3 @@ object NativeBridge {
     private fun MethodCall.stringArg(key: String, fallback: String): String =
         argument<String>(key) ?: fallback
 }
-</content>

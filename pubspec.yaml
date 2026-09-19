@@ -34,6 +34,7 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  flutter_screenshot_detect: ^0.1.7
   dio: ^5.11.1
   url_launcher: ^6.3.2
   add_2_calendar: ^3.1.1
@@ -43,7 +44,10 @@ dependencies:
   path_provider: ^2.1.6
   intl: ^0.20.3
   timeago: ^3.7.1
-  flutter_screenshot_detect: ^0.1.7
+  lottie: ^3.6.1
+  # On-device OCR. The Latin model is bundled in the app, so screenshot text is
+  # read locally without any network call or model download.
+  google_mlkit_text_recognition: ^0.15.1
 
 dev_dependencies:
   flutter_test:
@@ -66,6 +70,11 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Locally authored Lottie animations. They ship in the bundle rather than
+  # being fetched from a CDN so the UI never flashes or breaks offline.
+  assets:
+    - assets/lottie/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -1,30 +1,39 @@
 // This is a basic Flutter widget test.
 //
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// Verifies that the ScreenSift app initializes and renders the home screen
+// without crashing. It does not depend on the native screenshot bridge, so it
+// runs on any host including CI.
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:screensift/data/datasources/native_screenshot_source.dart';
+import 'package:screensift/data/datasources/settings_store.dart';
+import 'package:screensift/data/repositories/capture_repository.dart';
+import 'package:screensift/data/services/rule_based_extractor.dart';
 import 'package:screensift/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('ScreenSift app renders home screen', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prefs = await SharedPreferences.getInstance();
+    final settings = SettingsStore.withPrefs(prefs);
+    final repository = CaptureRepository(
+      native: NativeScreenshotSource(),
+      settings: settings,
+      prefs: prefs,
+      buildExtractor: RuleBasedExtractor.new,
+    );
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await tester.pumpWidget(
+      ScreenSiftApp(repository: repository, settings: settings),
+    );
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // The app title is shown in the scaffold AppBar.
+    expect(find.text('ScreenSift'), findsOneWidget);
   });
 }

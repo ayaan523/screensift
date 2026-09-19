@@ -5,6 +5,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
 import java.io.File
 import java.io.FileOutputStream
@@ -94,16 +95,27 @@ object MediaStoreScreenshotReader {
         limit: Int = 8,
     ): List<MediaStoreImage> {
         val selection = if (sinceId > 0) "$ID > ?" else null
-        val args = if (sinceId > 0) arrayOf(sinceId.toString()) else null
+        val selectionArgs = if (sinceId > 0) arrayOf(sinceId.toString()) else null
         val results = mutableListOf<MediaStoreImage>()
 
-        resolver.query(
-            collection,
-            projection,
-            selection,
-            args,
-            "$ID DESC LIMIT $limit",
-        )?.use { cursor ->
+        // Android 11 moved row limiting into a structured query-args Bundle.
+        // The old `"$ID DESC LIMIT n"` trick was only ever a convention and
+        // several OEM MediaStore implementations ignore it outright.
+        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val queryArgs = Bundle().apply {
+                if (selection != null) {
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                    putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, selectionArgs)
+                }
+                putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "$ID DESC")
+                putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
+            }
+            resolver.query(collection, projection, queryArgs, null)
+        } else {
+            resolver.query(collection, projection, selection, selectionArgs, "$ID DESC LIMIT$limit")
+        }
+
+        cursor?.use { cursor ->
             val idIdx = cursor.getColumnIndexOrThrow(ID)
             val nameIdx = cursor.getColumnIndexOrThrow(NAME)
             val dataIdx = cursor.getColumnIndex(DATA)
@@ -131,7 +143,7 @@ object MediaStoreScreenshotReader {
 
     /** Largest `_ID` currently visible, used to prime the observer cursor. */
     fun currentMaxId(resolver: ContentResolver): Long =
-        resolver.query(collection, arrayOf(ID), null, null, "$ID DESC LIMIT 1")
+        resolver.query(collection, arrayOf(ID), null, null, "$ID DESC")
             ?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
             ?: 0L
 
@@ -175,7 +187,10 @@ object MediaStoreScreenshotReader {
      */
     fun materialize(context: Context, image: MediaStoreImage): File? {
         val dir = File(context.cacheDir, CACHE_DIR).apply { mkdirs() }
-        val target = File(dir, "${image.dateAddedMillis}_${image.displayName}")
+        // Key the cache on `_ID` (stable and unique) instead of the timestamp:
+        // two captures in the same millisecond used to collide onto one file,
+        // and a `/` in DISPLAY_NAME could escape the cache directory entirely.
+        val target = File(dir, cacheFileName(image))
         if (target.exists() && target.length() > 0L) return target
 
         return runCatching {
@@ -184,6 +199,16 @@ object MediaStoreScreenshotReader {
             }
             if (target.length() > 0L) target else null
         }.getOrNull()
+    }
+
+    private fun cacheFileName(image: MediaStoreImage): String {
+        val suffix = image.displayName
+            .substringAfterLast('.', "")
+            .lowercase()
+            .filter { it.isLetterOrDigit() }
+            .take(5)
+            .takeIf { it.isNotEmpty() }
+        return if (suffix == null) "$CACHE_PREFIX${image.id}" else "$CACHE_PREFIX${image.id}.$suffix"
     }
 
     /** Removes the original from the gallery. Returns true when a row went away. */
@@ -197,4 +222,5 @@ object MediaStoreScreenshotReader {
     }
 
     private const val CACHE_DIR = "screensift_incoming"
+    private const val CACHE_PREFIX = "cap_"
 }
