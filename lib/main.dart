@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_screenshot_detect/flutter_screenshot_detect.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -33,15 +32,21 @@ Future<void> main() async {
     native: NativeScreenshotSource(),
     settings: settings,
     prefs: prefs,
-    onCaptureReady: notifications.showAction,
-    buildExtractor: () {
-      if (settings.canUseRemoteExtractor) {
-        return RemoteExtractor(
-          endpoint: settings.remoteEndpoint,
-          apiKey: settings.remoteApiKey,
-        );
+    onCaptureReady: (capture) {
+      if (settings.notifyOnCapture) {
+        notifications.showAction(capture);
       }
-      return RuleBasedExtractor(reader: MlKitTextReader());
+    },
+    buildExtractor: () {
+      // Bypassing the strict SettingsStore check.
+      // If AWS fails or times out, CaptureRepository will automatically 
+      // catch the error and fall back to the local RuleBasedExtractor.
+      return RemoteExtractor(
+        endpoint: settings.remoteEndpoint.isNotEmpty 
+            ? settings.remoteEndpoint 
+            : 'https://q5cb7obpxl.execute-api.ap-southeast-2.amazonaws.com/',
+        apiKey: settings.remoteApiKey,
+      );
     },
   );
   unawaited(repository.init());
@@ -86,25 +91,6 @@ class MainNavigationShell extends StatefulWidget {
 
 class _MainNavigationShellState extends State<MainNavigationShell> {
   int _index = 0;
-  StreamSubscription<FlutterScreenshotEvent>? _pluginScreenshotSubscription;
-
-  @override
-  void initState() {
-    super.initState();
-    _pluginScreenshotSubscription = FlutterScreenshotDetect().onScreenshot
-        .listen((event) {
-          final path = event.path;
-          if (path != null && path.isNotEmpty) {
-            unawaited(widget.repository.importFile(path));
-          }
-        });
-  }
-
-  @override
-  void dispose() {
-    _pluginScreenshotSubscription?.cancel();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {

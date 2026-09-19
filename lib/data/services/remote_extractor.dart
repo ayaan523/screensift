@@ -6,9 +6,6 @@ import '../models/sift_intent.dart';
 import 'capture_extractor.dart';
 
 /// Raised when the cloud path cannot produce an extraction.
-///
-/// Distinct from a transport error so the repository can show a useful message
-/// and fall back to the on-device engine instead of failing the capture.
 class ExtractionException implements Exception {
   const ExtractionException(this.message);
 
@@ -18,27 +15,6 @@ class ExtractionException implements Exception {
   String toString() => 'ExtractionException: $message';
 }
 
-/// Calls the ScreenSift extraction API (presign → S3 upload → status polling).
-///
-/// Dormant by default: [isConfigured] is false until the user sets an endpoint
-/// in Settings, so the app never phones home out of the box. The wire contract
-/// is a single multipart POST so it can be backed by a Lambda, a container, or
-/// a Bedrock proxy without changing this class.
-///
-/// Presign  – `POST {endpoint}/presign`
-/// Upload   – `PUT {uploadUrl}`
-/// Poll     – `GET {endpoint}/status/{jobId}` every 1.5s
-/// Success payload:
-/// ```json
-/// {
-///   "intent": "PAYMENT", "category": "FINANCE",
-///   "title": "Pay ₹450 to Rahul", "summary": "…",
-///   "amount": 450, "currency": "INR",
-///   "upi_id": "rahul@okhdfcbank", "payee_name": "Rahul",
-///   "link": null, "due_at": 1760000000000,
-///   "reference_code": null, "tags": ["Money"], "confidence": 0.92
-/// }
-/// ```
 class RemoteExtractor implements CaptureExtractor {
   RemoteExtractor({
     required this.endpoint,
@@ -71,22 +47,15 @@ class RemoteExtractor implements CaptureExtractor {
     }
     final String? imagePath = capture.cachedPath;
     if (imagePath == null || imagePath.isEmpty) {
-      throw const ExtractionException(
-        'The screenshot has no local copy to upload.',
-      );
+      throw const ExtractionException('The screenshot has no local copy to upload.');
     }
 
     final Map<Object?, Object?> presign = await _presign(capture);
-    final String uploadUrl =
-        _string(presign['uploadUrl']) ?? _string(presign['upload_url']) ?? '';
-    final String jobId =
-        _string(presign['jobId']) ??
-        _string(presign['job_id']) ??
-        '${capture.id}';
+    final String uploadUrl = _string(presign['uploadUrl']) ?? _string(presign['upload_url']) ?? '';
+    final String jobId = _string(presign['jobId']) ?? _string(presign['job_id']) ?? '${capture.id}';
+    
     if (uploadUrl.isEmpty) {
-      throw const ExtractionException(
-        'The server did not return an upload URL.',
-      );
+      throw const ExtractionException('The server did not return an upload URL.');
     }
     await _upload(uploadUrl, imagePath);
     return _poll(jobId);
@@ -105,8 +74,7 @@ class RemoteExtractor implements CaptureExtractor {
         },
         options: Options(
           headers: <String, String>{
-            if (apiKey.trim().isNotEmpty)
-              'Authorization': 'Bearer ${apiKey.trim()}',
+            if (apiKey.trim().isNotEmpty) 'Authorization': 'Bearer ${apiKey.trim()}',
             'Accept': 'application/json',
           },
           sendTimeout: timeout,
@@ -118,9 +86,7 @@ class RemoteExtractor implements CaptureExtractor {
     }
     final Object? body = response.data;
     if (body is! Map) {
-      throw const ExtractionException(
-        'The server returned an unexpected response.',
-      );
+      throw const ExtractionException('The server returned an unexpected response.');
     }
     return body.cast<Object?, Object?>();
   }
@@ -151,8 +117,7 @@ class RemoteExtractor implements CaptureExtractor {
           _resolve('status/$jobId'),
           options: Options(
             headers: <String, String>{
-              if (apiKey.trim().isNotEmpty)
-                'Authorization': 'Bearer ${apiKey.trim()}',
+              if (apiKey.trim().isNotEmpty) 'Authorization': 'Bearer ${apiKey.trim()}',
               'Accept': 'application/json',
             },
             receiveTimeout: timeout,
@@ -164,12 +129,10 @@ class RemoteExtractor implements CaptureExtractor {
       final Object? body = response.data;
       if (body is! Map) continue;
       final map = body.cast<Object?, Object?>();
-      final String state =
-          (_string(map['status']) ?? _string(map['state']) ?? '').toUpperCase();
+      final String state = (_string(map['status']) ?? _string(map['state']) ?? '').toUpperCase();
+      
       if (state == 'FAILED' || state == 'ERROR') {
-        throw const ExtractionException(
-          'The extraction service failed this capture.',
-        );
+        throw const ExtractionException('The extraction service failed this capture.');
       }
       if (state == 'SUCCESS' || state == 'READY' || map.containsKey('intent')) {
         final result = map['result'] ?? map['data'] ?? map;
@@ -178,9 +141,7 @@ class RemoteExtractor implements CaptureExtractor {
         }
       }
     }
-    throw const ExtractionException(
-      'The extraction service did not finish in time.',
-    );
+    throw const ExtractionException('The extraction service did not finish in time.');
   }
 
   String _resolve(String path) {
@@ -192,13 +153,9 @@ class RemoteExtractor implements CaptureExtractor {
     return switch (error.type) {
       DioExceptionType.connectionTimeout ||
       DioExceptionType.sendTimeout ||
-      DioExceptionType.receiveTimeout =>
-        'The extraction service took too long to respond.',
-      DioExceptionType.connectionError =>
-        'Could not reach the extraction service.',
-      DioExceptionType.badResponse =>
-        'The extraction service rejected the request '
-            '(${error.response?.statusCode ?? 'unknown'}).',
+      DioExceptionType.receiveTimeout => 'The extraction service took too long to respond.',
+      DioExceptionType.connectionError => 'Could not reach the extraction service.',
+      DioExceptionType.badResponse => 'The extraction service rejected the request.',
       _ => 'The extraction request failed.',
     };
   }
@@ -218,16 +175,10 @@ class RemoteExtractor implements CaptureExtractor {
       upiId: _string(body['upi_id']),
       payeeName: _string(body['payee_name']),
       link: _string(body['link']),
-      dueAt: dueAt is num
-          ? DateTime.fromMillisecondsSinceEpoch(dueAt.toInt())
-          : null,
+      dueAt: dueAt is num ? DateTime.fromMillisecondsSinceEpoch(dueAt.toInt()) : null,
       referenceCode: _string(body['reference_code']),
-      tags: (body['tags'] as List<Object?>? ?? const <Object?>[])
-          .map((Object? tag) => '$tag')
-          .toList(growable: false),
-      confidence: confidence is num
-          ? confidence.toDouble().clamp(0.0, 1.0)
-          : 0.5,
+      tags: (body['tags'] as List<Object?>? ?? const <Object?>[]).map((Object? tag) => '$tag').toList(growable: false),
+      confidence: confidence is num ? confidence.toDouble().clamp(0.0, 1.0) : 0.5,
     );
   }
 

@@ -9,22 +9,22 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.database.ContentObserver
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.Settings
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.ImageView
 import androidx.core.app.NotificationCompat
 
-/**
- * Keeps a MediaStore observer alive after the user leaves ScreenSift.
- *
- * This is the piece that makes the capture "invisible": the OS tells us the
- * moment a screenshot row appears, we copy it out of MediaStore, and we push
- * it onto [ScreenshotBus] for Dart to pick up — with no share sheet and no
- * user action.
- */
 class ScreenshotWatchService : Service() {
 
     private var observerThread: HandlerThread? = null
@@ -63,8 +63,6 @@ class ScreenshotWatchService : Service() {
         super.onDestroy()
     }
 
-    // --- observer -----------------------------------------------------------
-
     private fun registerObserver() {
         if (observer != null) return
 
@@ -76,7 +74,6 @@ class ScreenshotWatchService : Service() {
         val contentObserver = object : ContentObserver(handler) {
             override fun onChange(selfChange: Boolean) = scheduleScan()
         }
-        // notifyForDescendants: some OEMs notify on the bucket, not the row.
         contentResolver.registerContentObserver(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             true,
@@ -85,11 +82,6 @@ class ScreenshotWatchService : Service() {
         observer = contentObserver
     }
 
-    /**
-     * MediaStore fires `onChange` several times for one capture (thumbnails,
-     * bucket, row). Coalescing into a single scan avoids uploading the same
-     * screenshot three times.
-     */
     private fun scheduleScan() {
         val handler = observerHandler ?: return
         handler.removeCallbacksAndMessages(SCAN_TOKEN)
@@ -107,36 +99,81 @@ class ScreenshotWatchService : Service() {
         val fresh = candidates.filter { it.id > lastSeenId }
         lastSeenId = maxOf(lastSeenId, highestId)
 
-        for (image in fresh.sortedBy { it.id }) {
-            // Ambiguous rows (no screenshot token anywhere) are surfaced too,
-            // flagged so the Dart side can decide whether to act on them.
+        // STRICT FILTER RESTORED: Only process actual screenshots, ignore random OS images
+        val screenshots = fresh.filter { it.isScreenshot }
+
+        for (image in screenshots.sortedBy { it.id }) {
             val cacheFile = MediaStoreScreenshotReader.materialize(this, image)
             ScreenshotBus.publish(image.toMap(cacheFile?.absolutePath))
+            
+            // Try to draw the overlay button safely
+            Handler(Looper.getMainLooper()).post {
+                runCatching { showFloatingButton() }
+            }
         }
     }
 
-    // --- foreground bookkeeping --------------------------------------------
+    // --- Overlay Button Logic ---
+    private fun showFloatingButton() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            return
+        }
+
+        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            160, 160,
+            layoutFlag,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            x = 20
+            y = 0
+        }
+
+        val button = ImageView(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#FF4500")) // Red Button
+            }
+            setImageResource(android.R.drawable.ic_menu_search)
+            setColorFilter(Color.WHITE)
+            setPadding(35, 35, 35, 35)
+            elevation = 16f
+
+            setOnClickListener {
+                runCatching { windowManager.removeView(this) }
+                val intent = Intent(this@ScreenshotWatchService, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+                startActivity(intent)
+            }
+        }
+
+        windowManager.addView(button, params)
+        
+        // Auto-remove after 5 seconds
+        Handler(Looper.getMainLooper()).postDelayed({
+            runCatching { windowManager.removeView(button) }
+        }, 5000)
+    }
 
     private fun promoteToForeground() {
         val notification = buildNotification()
-        // `dataSync` cannot be started from BOOT_COMPLETED on Android 15 and is
-        // capped at a few hours a day, which is exactly the wrong shape for an
-        // always-on observer. `specialUse` is the correct, unrestricted type.
         if (Build.VERSION.SDK_INT >= 34) {
             runCatching {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-                )
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             }.onFailure { stopSelf() }
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                )
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             }.onFailure { stopSelf() }
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -145,10 +182,8 @@ class ScreenshotWatchService : Service() {
 
     private fun buildNotification(): Notification {
         val openApp = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
@@ -169,11 +204,7 @@ class ScreenshotWatchService : Service() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         manager.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                "Screenshot listener",
-                NotificationManager.IMPORTANCE_MIN,
-            ).apply {
+            NotificationChannel(CHANNEL_ID, "Screenshot listener", NotificationManager.IMPORTANCE_MIN).apply {
                 description = "Keeps ScreenSift listening for new screenshots."
                 setShowBadge(false)
             },
@@ -183,7 +214,6 @@ class ScreenshotWatchService : Service() {
     companion object {
         const val ACTION_START = "com.screensift.action.START_WATCH"
         const val ACTION_STOP = "com.screensift.action.STOP_WATCH"
-
         private const val CHANNEL_ID = "screensift.watcher"
         private const val NOTIFICATION_ID = 8101
         private const val SCAN_DEBOUNCE_MS = 700L
@@ -194,15 +224,13 @@ class ScreenshotWatchService : Service() {
             private set
 
         fun start(context: Context) {
-            val intent = Intent(context, ScreenshotWatchService::class.java)
-                .setAction(ACTION_START)
+            val intent = Intent(context, ScreenshotWatchService::class.java).setAction(ACTION_START)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
         }
-
         fun stop(context: Context) {
             context.stopService(Intent(context, ScreenshotWatchService::class.java))
             isRunning = false

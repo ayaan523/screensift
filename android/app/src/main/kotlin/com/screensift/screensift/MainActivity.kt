@@ -4,8 +4,11 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -13,19 +16,23 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
-/**
- * Hosts the Flutter engine and is the only place that owns an Activity, so it
- * is also the [PermissionHost] the bridge talks to.
- *
- * Before this existed the two channels were never registered at all, which made
- * every native call fail with `MissingPluginException` and left the whole
- * Kotlin screenshot watcher unreachable from Dart.
- */
 class MainActivity : FlutterActivity(), PermissionHost {
 
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var pendingDeleteResult: MethodChannel.Result? = null
     private var attachedSink: EventChannel.EventSink? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Hackathon trick: Auto-request "Draw over other apps" permission on startup
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -52,7 +59,6 @@ class MainActivity : FlutterActivity(), PermissionHost {
     }
 
     // --- PermissionHost ------------------------------------------------------
-
     override fun hostActivity(): Activity = this
 
     override fun hasPermission(kind: String): Boolean = when (kind) {
@@ -66,17 +72,13 @@ class MainActivity : FlutterActivity(), PermissionHost {
             else -> mediaPermission()
         }
 
-        // Android < 13 has no notification permission, and pre-Q grants media at
-        // install time — report success instead of opening a phantom dialog.
         if (permission == null ||
-            ContextCompat.checkSelfPermission(this, permission) ==
-            PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
         ) {
             result.success(true)
             return
         }
 
-        // One OS dialog can be in flight at a time; resolve the stale request.
         pendingPermissionResult?.success(false)
         pendingPermissionResult = result
         ActivityCompat.requestPermissions(this, arrayOf(permission), REQUEST_PERMISSION)
@@ -95,8 +97,6 @@ class MainActivity : FlutterActivity(), PermissionHost {
             return
         }
 
-        // Android 10+ refuses to delete media the app does not own, so hand the
-        // OS a signed delete request and let the user confirm it.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val pending = runCatching {
                 MediaStore.createDeleteRequest(contentResolver, listOf(image.uri))
@@ -111,22 +111,13 @@ class MainActivity : FlutterActivity(), PermissionHost {
                 pendingDeleteResult = null
             }
         }
-
-        // Owned media (or API < 30) can be deleted straight away.
         result.success(MediaStoreScreenshotReader.delete(this, image))
     }
 
-    // --- Activity callbacks --------------------------------------------------
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_PERMISSION) return
-        val granted = grantResults.isNotEmpty() &&
-            grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
         pendingPermissionResult?.success(granted)
         pendingPermissionResult = null
     }
@@ -139,7 +130,6 @@ class MainActivity : FlutterActivity(), PermissionHost {
     }
 
     override fun onDestroy() {
-        // Never leave Dart awaiting a reply that can no longer arrive.
         pendingPermissionResult?.success(false)
         pendingPermissionResult = null
         pendingDeleteResult?.success(false)
@@ -149,25 +139,19 @@ class MainActivity : FlutterActivity(), PermissionHost {
         super.onDestroy()
     }
 
-    // --- helpers -------------------------------------------------------------
-
     private fun mediaPermission(): String? = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
-            Manifest.permission.READ_MEDIA_IMAGES
-
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> Manifest.permission.READ_MEDIA_IMAGES
         else -> Manifest.permission.READ_EXTERNAL_STORAGE
     }
 
     private fun hasMediaPermission(): Boolean {
         val permission = mediaPermission() ?: return true
-        return ContextCompat.checkSelfPermission(this, permission) ==
-            PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun hasNotificationPermission(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
     private companion object {
         const val REQUEST_PERMISSION = 7301

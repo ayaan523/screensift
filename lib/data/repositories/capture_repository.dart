@@ -11,6 +11,8 @@ import '../models/processing_status.dart';
 import '../models/sift_capture.dart';
 import '../models/sift_category.dart';
 import '../services/capture_extractor.dart';
+import '../services/image_text_reader.dart';
+import '../services/rule_based_extractor.dart';
 
 class CaptureRepository extends ChangeNotifier {
   CaptureRepository({
@@ -35,7 +37,7 @@ class CaptureRepository extends ChangeNotifier {
 
   bool _initialized = false;
   bool _isProcessing = false;
-  bool _mounted = true; // Added to fix the 'mounted' check errors
+  bool _mounted = true; 
   SiftCapture? _active;
   SiftCapture? _lastReady;
   String? _lastError;
@@ -112,21 +114,18 @@ class CaptureRepository extends ChangeNotifier {
     await _loadCaptures();
     _startWatching();
     await _refreshPlatform();
-    // Keep the native watcher in step with the persisted toggle. A cold start
-    // with watching off must not leave the foreground service running.
+    
     if (settings.watchEnabled) {
       await native.startWatching();
     } else {
       await native.stopWatching();
     }
-    // Captures the watcher saw while Dart was down are queued natively and
-    // drained here so nothing is lost across restarts.
+    
     final buffered = await native.drainBufferedCaptures();
     for (final raw in buffered) {
       _onCaptureEvent(raw);
     }
-    // Import screenshots already on the device on first run. Media
-    // permission must be granted first or the query comes back empty.
+    
     if (_captures.isEmpty) {
       await _ensurePermissions();
       await importRecent();
@@ -134,8 +133,6 @@ class CaptureRepository extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Asks for media access once per install. Silent when already granted so
-  /// cold starts never flash a dialog.
   Future<void> _ensurePermissions() async {
     final bool granted = await native.hasPermission(
       NativeScreenshotSource.permissionMedia,
@@ -147,11 +144,11 @@ class CaptureRepository extends ChangeNotifier {
 
   @override
   void dispose() {
-    _mounted = false; // Mark as unmounted before disposing
+    _mounted = false;
     _subscription?.cancel();
     _subscription = null;
     _active = null;
-    super.dispose(); // Use the standard ChangeNotifier dispose
+    super.dispose();
   }
 
   void setCategory(SiftCategory value) {
@@ -246,9 +243,6 @@ class CaptureRepository extends ChangeNotifier {
     final id = (raw['id'] as num?)?.toInt() ?? 0;
     if (id == 0 || byId(id) != null) return;
 
-    // `fromNativeMap` is the single conversion point for bridge rows so the
-    // watcher event, the drain buffer and the recent-imports path all agree on
-    // field names and defaults.
     final capture = SiftCapture.fromNativeMap(raw);
 
     _captures.insert(0, capture);
@@ -264,16 +258,28 @@ class CaptureRepository extends ChangeNotifier {
     _isProcessing = true;
     notifyListeners();
     SiftCapture updated;
+    
     try {
-      // The extractor needs a local copy of the image; the watcher only hands
-      // over an id, so materialize first.
       final SiftCapture materialized = await _materialized(capture);
-      final SiftExtraction extraction = await buildExtractor().extract(
-        materialized,
-      );
+      SiftExtraction extraction;
+      
+      // Fallback logic for AWS timeouts or network failures
+      try {
+        extraction = await buildExtractor().extract(materialized);
+      } catch (e, stack) {
+        debugPrint('ScreenSift: Remote extraction failed, falling back to local ML Kit: $e');
+        extraction = await RuleBasedExtractor(reader: MlKitTextReader()).extract(materialized);
+      }
+
       updated = extraction.applyTo(materialized);
       _lastReady = updated;
       onCaptureReady?.call(updated);
+
+      // Enforce Auto-Trash for successful extractions
+      if (settings.autoTrash && updated.isActionable) {
+        await native.requestDeleteCapture(updated.id);
+      }
+      
     } catch (e, stack) {
       debugPrint('ScreenSift: extraction failed for #${capture.id}: $e');
       debugPrint(stack.toString());
@@ -283,6 +289,7 @@ class CaptureRepository extends ChangeNotifier {
       );
       _lastError = '$e';
     }
+    
     final idx = _captures.indexWhere((c) => c.id == capture.id);
     if (idx != -1) _captures[idx] = updated;
     _persist();
@@ -291,7 +298,6 @@ class CaptureRepository extends ChangeNotifier {
     if (_mounted) notifyListeners();
   }
 
-  /// Copies the source image into the app-private cache exactly once.
   Future<SiftCapture> _materialized(SiftCapture capture) async {
     final String? cached = capture.cachedPath;
     if (cached != null && cached.isNotEmpty && File(cached).existsSync()) {
@@ -302,7 +308,6 @@ class CaptureRepository extends ChangeNotifier {
     return capture.copyWith(cachedPath: path);
   }
 
-  /// Re-runs extraction for a capture that previously failed.
   Future<void> retry(SiftCapture capture) async {
     final idx = _captures.indexWhere((c) => c.id == capture.id);
     if (idx == -1) return;
@@ -316,7 +321,6 @@ class CaptureRepository extends ChangeNotifier {
     await _processCapture(reset);
   }
 
-  /// One-time import of screenshots already on the device, newest first.
   Future<int> importRecent({int limit = 15}) async {
     final rows = await native.recentScreenshots(limit: limit);
     var added = 0;
@@ -340,7 +344,7 @@ class CaptureRepository extends ChangeNotifier {
       return;
     }
     final capture = SiftCapture(
-      id: DateTime.now().microsecondsSinceEpoch,
+      id: DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF, // Safe 32-bit ID preventing same-second collision
       createdAt: DateTime.now(),
       name: path.split(Platform.pathSeparator).last,
       cachedPath: path,
@@ -353,7 +357,6 @@ class CaptureRepository extends ChangeNotifier {
     await _processCapture(capture);
   }
 
-  /// Starts or stops the native watcher. Returns whether the OS accepted it.
   Future<bool> setWatchEnabled(bool value) async {
     final bool ok = value
         ? await native.startWatching()

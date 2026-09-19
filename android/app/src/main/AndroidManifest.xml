@@ -12,8 +12,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    
+    <!-- Required to draw the floating red button over the OS -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Required for url_launcher to resolve UPI handlers and browsers. -->
+   <!-- Required for url_launcher to resolve UPI handlers and browsers. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.VIEW" />
@@ -21,9 +25,14 @@
         </intent>
         <intent>
             <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
     </queries>
+    
 
     <application
         android:label="ScreenSift"

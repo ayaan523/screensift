@@ -48,6 +48,7 @@ dependencies:
   # On-device OCR. The Latin model is bundled in the app, so screenshot text is
   # read locally without any network call or model download.
   google_mlkit_text_recognition: ^0.15.1
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:
