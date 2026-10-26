@@ -61,12 +61,7 @@
         <service
             android:name=".ScreenshotWatchService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <!-- Required by the Play Console to justify a specialUse service. -->
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="on-device screenshot action extraction" />
-        </service>
+            android:foregroundServiceType="dataSync" />
 
         <!-- Restarts watcher on device reboot -->
         <receiver

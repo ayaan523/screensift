@@ -15,10 +15,8 @@ import 'data/models/sift_category.dart';
 import 'data/models/sift_intent.dart';
 import 'data/repositories/capture_repository.dart';
 import 'data/services/action_dispatcher.dart' as actions;
-import 'data/services/image_text_reader.dart';
 import 'data/services/notification_service.dart';
 import 'data/services/remote_extractor.dart';
-import 'data/services/rule_based_extractor.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,13 +37,12 @@ Future<void> main() async {
     },
     buildExtractor: () {
       // Bypassing the strict SettingsStore check.
-      // If AWS fails or times out, CaptureRepository will automatically 
+      // If AWS fails or times out, CaptureRepository will automatically
       // catch the error and fall back to the local RuleBasedExtractor.
       return RemoteExtractor(
-        endpoint: settings.remoteEndpoint.isNotEmpty 
-            ? settings.remoteEndpoint 
-            : 'https://q5cb7obpxl.execute-api.ap-southeast-2.amazonaws.com/',
-        apiKey: settings.remoteApiKey,
+        baseUrl: settings.remoteEndpoint.isNotEmpty
+            ? settings.remoteEndpoint
+            : 'https://q5cb7obpxl.execute-api.ap-southeast-2.amazonaws.com',
       );
     },
   );

@@ -11,8 +11,6 @@ import '../models/processing_status.dart';
 import '../models/sift_capture.dart';
 import '../models/sift_category.dart';
 import '../services/capture_extractor.dart';
-import '../services/image_text_reader.dart';
-import '../services/rule_based_extractor.dart';
 
 class CaptureRepository extends ChangeNotifier {
   CaptureRepository({
@@ -37,7 +35,7 @@ class CaptureRepository extends ChangeNotifier {
 
   bool _initialized = false;
   bool _isProcessing = false;
-  bool _mounted = true; 
+  bool _mounted = true;
   SiftCapture? _active;
   SiftCapture? _lastReady;
   String? _lastError;
@@ -114,18 +112,18 @@ class CaptureRepository extends ChangeNotifier {
     await _loadCaptures();
     _startWatching();
     await _refreshPlatform();
-    
+
     if (settings.watchEnabled) {
       await native.startWatching();
     } else {
       await native.stopWatching();
     }
-    
+
     final buffered = await native.drainBufferedCaptures();
     for (final raw in buffered) {
       _onCaptureEvent(raw);
     }
-    
+
     if (_captures.isEmpty) {
       await _ensurePermissions();
       await importRecent();
@@ -256,20 +254,27 @@ class CaptureRepository extends ChangeNotifier {
   Future<void> _processCapture(SiftCapture capture) async {
     if (!_mounted) return;
     _isProcessing = true;
+    _replaceCapture(
+      capture.copyWith(status: ProcessingStatus.uploading, clearError: true),
+    );
     notifyListeners();
     SiftCapture updated;
-    
+
     try {
       final SiftCapture materialized = await _materialized(capture);
-      SiftExtraction extraction;
-      
-      // Fallback logic for AWS timeouts or network failures
-      try {
-        extraction = await buildExtractor().extract(materialized);
-      } catch (e, stack) {
-        debugPrint('ScreenSift: Remote extraction failed, falling back to local ML Kit: $e');
-        extraction = await RuleBasedExtractor(reader: MlKitTextReader()).extract(materialized);
+      if (materialized.cachedPath == null || materialized.cachedPath!.isEmpty) {
+        throw Exception('Could not read a local copy of the screenshot.');
       }
+
+      _replaceCapture(
+        materialized.copyWith(
+          status: ProcessingStatus.extracting,
+          clearError: true,
+        ),
+      );
+
+      final extractor = buildExtractor();
+      final extraction = await extractor.extract(materialized);
 
       updated = extraction.applyTo(materialized);
       _lastReady = updated;
@@ -279,7 +284,6 @@ class CaptureRepository extends ChangeNotifier {
       if (settings.autoTrash && updated.isActionable) {
         await native.requestDeleteCapture(updated.id);
       }
-      
     } catch (e, stack) {
       debugPrint('ScreenSift: extraction failed for #${capture.id}: $e');
       debugPrint(stack.toString());
@@ -289,13 +293,18 @@ class CaptureRepository extends ChangeNotifier {
       );
       _lastError = '$e';
     }
-    
-    final idx = _captures.indexWhere((c) => c.id == capture.id);
-    if (idx != -1) _captures[idx] = updated;
+
+    _replaceCapture(updated);
     _persist();
     _isProcessing = false;
     _active = null;
     if (_mounted) notifyListeners();
+  }
+
+  void _replaceCapture(SiftCapture capture) {
+    final idx = _captures.indexWhere((c) => c.id == capture.id);
+    if (idx != -1) _captures[idx] = capture;
+    if (_active?.id == capture.id) _active = capture;
   }
 
   Future<SiftCapture> _materialized(SiftCapture capture) async {
@@ -344,7 +353,9 @@ class CaptureRepository extends ChangeNotifier {
       return;
     }
     final capture = SiftCapture(
-      id: DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF, // Safe 32-bit ID preventing same-second collision
+      id:
+          DateTime.now().millisecondsSinceEpoch &
+          0x7FFFFFFF, // Safe 32-bit ID preventing same-second collision
       createdAt: DateTime.now(),
       name: path.split(Platform.pathSeparator).last,
       cachedPath: path,

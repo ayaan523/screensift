@@ -1,32 +1,22 @@
-import 'package:dio/dio.dart';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../models/sift_capture.dart';
 import '../models/sift_category.dart';
 import '../models/sift_intent.dart';
 import 'capture_extractor.dart';
 
-/// Raised when the cloud path cannot produce an extraction.
-class ExtractionException implements Exception {
-  const ExtractionException(this.message);
-
-  final String message;
-
-  @override
-  String toString() => 'ExtractionException: $message';
-}
-
 class RemoteExtractor implements CaptureExtractor {
-  RemoteExtractor({
-    required this.endpoint,
-    required this.apiKey,
-    Dio? dio,
-    this.timeout = const Duration(seconds: 30),
-  }) : _dio = dio ?? Dio();
+  final String baseUrl;
 
-  final String endpoint;
-  final String apiKey;
-  final Duration timeout;
-  final Dio _dio;
+  RemoteExtractor({required this.baseUrl});
+
+  static const Duration _requestTimeout = Duration(seconds: 20);
+  static const Duration _pollDelay = Duration(seconds: 2);
+  static const int _maxPollAttempts = 15;
 
   @override
   String get id => 'remote';
@@ -38,153 +28,186 @@ class RemoteExtractor implements CaptureExtractor {
   bool get requiresNetwork => true;
 
   @override
-  bool get isConfigured => endpoint.trim().isNotEmpty;
+  bool get isConfigured => baseUrl.trim().isNotEmpty;
 
   @override
   Future<SiftExtraction> extract(SiftCapture capture) async {
-    if (!isConfigured) {
-      throw const ExtractionException('No extraction endpoint is configured.');
-    }
-    final String? imagePath = capture.cachedPath;
-    if (imagePath == null || imagePath.isEmpty) {
-      throw const ExtractionException('The screenshot has no local copy to upload.');
+    final path = capture.cachedPath;
+    if (path == null || path.isEmpty) {
+      throw Exception('The screenshot has no local copy to upload.');
     }
 
-    final Map<Object?, Object?> presign = await _presign(capture);
-    final String uploadUrl = _string(presign['uploadUrl']) ?? _string(presign['upload_url']) ?? '';
-    final String jobId = _string(presign['jobId']) ?? _string(presign['job_id']) ?? '${capture.id}';
-    
-    if (uploadUrl.isEmpty) {
-      throw const ExtractionException('The server did not return an upload URL.');
-    }
-    await _upload(uploadUrl, imagePath);
-    return _poll(jobId);
-  }
-
-  Future<Map<Object?, Object?>> _presign(SiftCapture capture) async {
-    final Response<Object?> response;
-    try {
-      response = await _dio.post<Object?>(
-        _resolve('presign'),
-        data: <String, Object?>{
-          'capture_id': capture.id,
-          'name': capture.name,
-          'content_type': 'image/png',
-          'captured_at': capture.createdAt.toIso8601String(),
-        },
-        options: Options(
-          headers: <String, String>{
-            if (apiKey.trim().isNotEmpty) 'Authorization': 'Bearer ${apiKey.trim()}',
-            'Accept': 'application/json',
-          },
-          sendTimeout: timeout,
-          receiveTimeout: timeout,
-        ),
-      );
-    } on DioException catch (error) {
-      throw ExtractionException(_describe(error));
-    }
-    final Object? body = response.data;
-    if (body is! Map) {
-      throw const ExtractionException('The server returned an unexpected response.');
-    }
-    return body.cast<Object?, Object?>();
-  }
-
-  Future<void> _upload(String uploadUrl, String imagePath) async {
-    try {
-      await _dio.put<Object?>(
-        uploadUrl,
-        data: MultipartFile.fromFileSync(imagePath).finalize(),
-        options: Options(
-          headers: <String, String>{'Content-Type': 'image/png'},
-          sendTimeout: timeout,
-          receiveTimeout: timeout,
-        ),
-      );
-    } on DioException catch (error) {
-      throw ExtractionException(_describe(error));
-    }
-  }
-
-  Future<SiftExtraction> _poll(String jobId) async {
-    final DateTime deadline = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 1500));
-      final Response<Object?> response;
-      try {
-        response = await _dio.get<Object?>(
-          _resolve('status/$jobId'),
-          options: Options(
-            headers: <String, String>{
-              if (apiKey.trim().isNotEmpty) 'Authorization': 'Bearer ${apiKey.trim()}',
-              'Accept': 'application/json',
-            },
-            receiveTimeout: timeout,
-          ),
-        );
-      } on DioException catch (error) {
-        throw ExtractionException(_describe(error));
-      }
-      final Object? body = response.data;
-      if (body is! Map) continue;
-      final map = body.cast<Object?, Object?>();
-      final String state = (_string(map['status']) ?? _string(map['state']) ?? '').toUpperCase();
-      
-      if (state == 'FAILED' || state == 'ERROR') {
-        throw const ExtractionException('The extraction service failed this capture.');
-      }
-      if (state == 'SUCCESS' || state == 'READY' || map.containsKey('intent')) {
-        final result = map['result'] ?? map['data'] ?? map;
-        if (result is Map) {
-          return _fromResponse(result.cast<Object?, Object?>());
-        }
-      }
-    }
-    throw const ExtractionException('The extraction service did not finish in time.');
-  }
-
-  String _resolve(String path) {
-    final String base = endpoint.trim().replaceAll(RegExp(r'/+$'), '');
-    return '$base/${path.replaceAll(RegExp(r'^/+'), '')}';
-  }
-
-  String _describe(DioException error) {
-    return switch (error.type) {
-      DioExceptionType.connectionTimeout ||
-      DioExceptionType.sendTimeout ||
-      DioExceptionType.receiveTimeout => 'The extraction service took too long to respond.',
-      DioExceptionType.connectionError => 'Could not reach the extraction service.',
-      DioExceptionType.badResponse => 'The extraction service rejected the request.',
-      _ => 'The extraction request failed.',
-    };
-  }
-
-  SiftExtraction _fromResponse(Map<Object?, Object?> body) {
-    final Object? dueAt = body['due_at'];
-    final Object? amount = body['amount'];
-    final Object? confidence = body['confidence'];
-
+    final data = await extractData(File(path));
     return SiftExtraction(
-      intent: SiftIntent.fromWire(body['intent']),
-      category: SiftCategory.fromWire(body['category']),
-      title: _string(body['title']),
-      summary: _string(body['summary']),
-      amount: amount is num ? amount.toDouble() : null,
-      currency: _string(body['currency']) ?? 'INR',
-      upiId: _string(body['upi_id']),
-      payeeName: _string(body['payee_name']),
-      link: _string(body['link']),
-      dueAt: dueAt is num ? DateTime.fromMillisecondsSinceEpoch(dueAt.toInt()) : null,
-      referenceCode: _string(body['reference_code']),
-      tags: (body['tags'] as List<Object?>? ?? const <Object?>[]).map((Object? tag) => '$tag').toList(growable: false),
-      confidence: confidence is num ? confidence.toDouble().clamp(0.0, 1.0) : 0.5,
+      intent: SiftIntent.fromWire(data['intent']),
+      category: SiftCategory.fromWire(data['category']),
+      title: data['title'] as String?,
+      summary: data['summary'] as String?,
+      amount: _parseAmount(data['amount']),
+      currency: (data['currency'] as String?) ?? 'INR',
+      upiId: data['upi_id'] as String?,
+      payeeName: data['payee_name'] as String?,
+      link: data['link'] as String?,
+      dueAt: _parseDateTime(data['due_at']),
+      referenceCode: data['reference_code'] as String?,
+      tags: (data['tags'] as List<Object?>? ?? const <Object?>[])
+          .map((tag) => '$tag')
+          .toList(growable: false),
+      confidence: _parseAmount(data['confidence']) ?? 0.7,
     );
   }
 
-  String? _string(Object? value) {
-    if (value is! String) return null;
-    final String trimmed = value.trim();
-    return trimmed.isEmpty ? null : trimmed;
+  // Tolerant numeric parsing for amounts sent as strings (e.g., "450", "₹450.00")
+  double? _parseAmount(dynamic raw) {
+    if (raw == null) return null;
+    if (raw is num) return raw.toDouble();
+    if (raw is String) {
+      final sanitized = raw.replaceAll(RegExp(r'[^\d.]'), '');
+      return double.tryParse(sanitized);
+    }
+    return null;
+  }
+
+  // Tolerant date parsing for ISO 8601 strings and Unix epoch integers
+  DateTime? _parseDateTime(dynamic raw) {
+    if (raw == null) return null;
+    if (raw is int) {
+      // Determine if epoch is in seconds or milliseconds
+      return raw < 10000000000
+          ? DateTime.fromMillisecondsSinceEpoch(raw * 1000)
+          : DateTime.fromMillisecondsSinceEpoch(raw);
+    }
+    if (raw is String) {
+      return DateTime.tryParse(raw);
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>> extractData(File imageFile) async {
+    try {
+      // 1. Request Presigned S3 URL
+      final normalizedBaseUrl = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+      final presignRes = await http
+          .post(Uri.parse('$normalizedBaseUrl/presign'))
+          .timeout(_requestTimeout);
+      if (presignRes.statusCode != 200) {
+        throw Exception(
+          'Failed to get presign URL: HTTP ${presignRes.statusCode} '
+          '${_responseSnippet(presignRes)}',
+        );
+      }
+
+      final presignJson = _decodeObject(presignRes.body, 'presign response');
+
+      // Handle snake_case vs camelCase
+      final jobId = presignJson['job_id'] ?? presignJson['jobId'];
+      final uploadUrl = presignJson['upload_url'] ?? presignJson['uploadUrl'];
+
+      if (jobId == null || uploadUrl == null) {
+        throw Exception("Invalid API response: missing jobId or uploadUrl");
+      }
+
+      // 2. Upload image to S3.
+      final imageBytes = await imageFile.readAsBytes();
+      final uploadRes = await http
+          .put(
+            Uri.parse('$uploadUrl'),
+            headers: const <String, String>{'Content-Type': 'image/jpeg'},
+            body: imageBytes,
+          )
+          .timeout(_requestTimeout);
+
+      if (uploadRes.statusCode != 200 && uploadRes.statusCode != 204) {
+        throw Exception(
+          'S3 image upload failed: HTTP ${uploadRes.statusCode} '
+          '${_responseSnippet(uploadRes)}',
+        );
+      }
+
+      // 3. Poll API Gateway for processed status
+      return await _pollForStatus(jobId);
+    } catch (e) {
+      // Explicitly log this so the fallback to local ML Kit is not silent
+      debugPrint('RemoteExtraction Error: $e');
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> _pollForStatus(String jobId) async {
+    for (int i = 0; i < _maxPollAttempts; i++) {
+      await Future.delayed(_pollDelay);
+
+      final normalizedBaseUrl = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+      final statusRes = await http
+          .get(Uri.parse('$normalizedBaseUrl/status/$jobId'))
+          .timeout(_requestTimeout);
+      if (statusRes.statusCode != 200) {
+        debugPrint(
+          'ScreenSift: status poll $jobId attempt ${i + 1} failed: '
+          'HTTP ${statusRes.statusCode} ${_responseSnippet(statusRes)}',
+        );
+        continue;
+      }
+
+      final statusJson = _decodeObject(statusRes.body, 'status response');
+      final status = statusJson['status']?.toString().toUpperCase();
+
+      if (status == 'SUCCESS') {
+        // Flatten nested result objects if necessary
+        final result = statusJson['result'] ?? statusJson;
+
+        return {
+          'intent': result['intent'],
+          'category': result['category'],
+          'title': result['title'],
+          'summary': result['summary'],
+          'amount': _parseAmount(result['amount']),
+          'currency': result['currency'],
+          'upi_id': result['upi_id'] ?? result['upiId'],
+          'payee_name': result['payee_name'] ?? result['payeeName'],
+          'link': result['link'],
+          'due_at': _parseDateTime(
+            result['due_at'] ??
+                result['date'] ??
+                result['dueDate'] ??
+                result['due_date'],
+          ),
+          'reference_code': result['reference_code'] ?? result['referenceCode'],
+          'tags': result['tags'],
+          'confidence': result['confidence'],
+        };
+      } else if (status == 'FAILED') {
+        throw Exception(
+          'Backend extraction failed for job $jobId: '
+          '${statusJson['error'] ?? statusJson['message'] ?? 'no details'}',
+        );
+      }
+    }
+
+    throw Exception(
+      'Polling timeout: job $jobId did not finish after '
+      '${_maxPollAttempts * _pollDelay.inSeconds} seconds.',
+    );
+  }
+
+  Map<String, dynamic> _decodeObject(String body, String label) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException catch (error) {
+      throw Exception('Invalid JSON in $label: $error');
+    }
+    if (decoded is Map<String, dynamic>) return decoded;
+    if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    throw Exception('Invalid $label: expected a JSON object.');
+  }
+
+  String _responseSnippet(http.Response response) {
+    final body = response.body.trim();
+    if (body.isEmpty) return '';
+    const maxLength = 300;
+    return body.length <= maxLength
+        ? body
+        : '${body.substring(0, maxLength)}...';
   }
 }

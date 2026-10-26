@@ -167,11 +167,7 @@ class ScreenshotWatchService : Service() {
 
     private fun promoteToForeground() {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= 34) {
-            runCatching {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            }.onFailure { stopSelf() }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             }.onFailure { stopSelf() }
